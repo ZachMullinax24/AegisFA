@@ -15,14 +15,18 @@ from .openai_client import get_openai_client, get_embedding
 # Public API — drop-in replacement for threat_analysis.analyze_threats
 # ---------------------------------------------------------------------------
 
-def analyze_threats(log_entries: list[dict], source_type: str) -> dict:
+def analyze_threats(
+    log_entries: list[dict],
+    source_type: str,
+    detections: list[dict] = None,
+) -> dict:
     """
     Analyze log entries for security threats using RAG.
 
     Three-phase pipeline:
       1. Detect threats via gpt-4o-mini
       2. Retrieve relevant MITRE ATT&CK techniques from pgvector
-      3. Generate enriched incident summary with MITRE context
+      3. Generate enriched incident summary with MITRE + correlation context
 
     Returns a dict matching the extended analysis_results schema.
     """
@@ -34,9 +38,10 @@ def analyze_threats(log_entries: list[dict], source_type: str) -> dict:
     # Phase 2 — RAG retrieval of MITRE techniques
     mitre_context = _retrieve_mitre_techniques(findings, source_type)
 
-    # Phase 3 — enriched incident summary
+    # Phase 3 — enriched incident summary (with correlation detections)
     summary_result = _generate_incident_summary(
-        client, log_entries, source_type, findings, mitre_context
+        client, log_entries, source_type, findings, mitre_context,
+        detections=detections,
     )
 
     threat_level = _determine_threat_level(findings)
@@ -144,10 +149,11 @@ def _generate_incident_summary(
     source_type: str,
     findings: list[dict],
     mitre_context: list[dict],
+    detections: list[dict] = None,
 ) -> dict:
     """
-    Using threat findings + retrieved MITRE techniques as context,
-    generate a structured incident summary with gpt-4o-mini.
+    Using threat findings + retrieved MITRE techniques + correlation
+    detections as context, generate a structured incident summary.
     """
     # Format MITRE context
     mitre_text = ""
@@ -162,12 +168,24 @@ def _generate_incident_summary(
             )
         mitre_text = "Relevant MITRE ATT&CK techniques:\n" + "\n".join(mitre_parts)
 
+    # Format correlation detections
+    detection_text = ""
+    if detections:
+        det_parts = []
+        for det in detections:
+            det_parts.append(
+                f"- Rule '{det['rule_name']}' (MITRE {det['mitre_technique']}): "
+                f"{det['description']} [confidence: {det['confidence']:.2f}]"
+            )
+        detection_text = "Correlation rule detections:\n" + "\n".join(det_parts)
+
     findings_text = json.dumps(findings[:15], indent=2, default=str)
     sample_entries = json.dumps(log_entries[:20], default=str)
 
     system_prompt = (
         "You are a senior forensic analyst writing an incident report. "
-        "Based on the threat findings, log data, and MITRE ATT&CK context provided, "
+        "Based on the threat findings, log data, MITRE ATT&CK context, "
+        "and correlation rule detections provided, "
         "generate a structured incident summary.\n\n"
         "Return ONLY a JSON object with this exact structure:\n"
         "{\n"
@@ -187,7 +205,8 @@ def _generate_incident_summary(
         f"Total log entries: {len(log_entries)}\n\n"
         f"Sample log entries:\n{sample_entries}\n\n"
         f"Threat findings:\n{findings_text}\n\n"
-        f"{mitre_text}"
+        f"{mitre_text}\n\n"
+        f"{detection_text}"
     )
 
     response = client.chat.completions.create(

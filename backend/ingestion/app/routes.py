@@ -3,6 +3,7 @@ from . import supabase_client
 from .normalization import normalize_log
 from .file_parser import parse_file
 from .rag_service import analyze_threats
+from .correlation_engine import run_correlation
 from .storage import upload_file
 from datetime import datetime, timezone
 
@@ -98,14 +99,21 @@ def upload_log_file():
         supabase_client.table('log_files').update({'status': 'failed'}).eq('id', file_id).execute()
         return jsonify({'error': f'Failed to store log entries: {str(e)}'}), 500
 
-    # 5. Run ML threat analysis
+    # 5. Run correlation engine (non-fatal if it fails)
     try:
-        analysis = analyze_threats(entries, source_type)
+        detections = run_correlation(entries, org_id, file_id)
+    except Exception as e:
+        detections = []
+        print(f"Correlation engine warning: {e}")
+
+    # 6. Run RAG threat analysis (with correlation context)
+    try:
+        analysis = analyze_threats(entries, source_type, detections=detections)
     except Exception as e:
         supabase_client.table('log_files').update({'status': 'failed'}).eq('id', file_id).execute()
         return jsonify({'error': f'Threat analysis failed: {str(e)}'}), 500
 
-    # 6. Store analysis results
+    # 7. Store analysis results
     try:
         supabase_client.table('analysis_results').insert({
             'file_id': file_id,
@@ -119,18 +127,21 @@ def upload_log_file():
             'impacted_assets': analysis.get('impacted_assets'),
             'confidence_score': analysis.get('confidence_score'),
             'remediation_steps': analysis.get('remediation_steps'),
+            'correlation_detections': detections,
         }).execute()
     except Exception as e:
         supabase_client.table('log_files').update({'status': 'failed'}).eq('id', file_id).execute()
         return jsonify({'error': f'Failed to store analysis: {str(e)}'}), 500
 
-    # 7. Mark file as completed
+    # 8. Mark file as completed
     supabase_client.table('log_files').update({'status': 'completed'}).eq('id', file_id).execute()
 
     return jsonify({
         'file_id': file_id,
         'filename': file.filename,
         'entry_count': len(entries),
+        'detections': detections,
+        'detection_count': len(detections),
         'analysis': {
             'threat_level': analysis['threat_level'],
             'threats_found': analysis['threats_found'],
@@ -167,3 +178,90 @@ def list_files():
 @main.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'ok'}), 200
+
+
+# ------------------------------------------------------------------
+# Correlation Rules CRUD
+# ------------------------------------------------------------------
+
+@main.route('/rules', methods=['GET'])
+def list_rules():
+    org_id = request.args.get('org_id')
+    if not org_id:
+        return jsonify({'error': 'org_id is required'}), 400
+
+    org_rules = supabase_client.table('correlation_rules').select('*').eq('org_id', org_id).execute()
+    default_rules = supabase_client.table('correlation_rules').select('*').is_('org_id', 'null').execute()
+    all_rules = (default_rules.data or []) + (org_rules.data or [])
+    return jsonify(all_rules), 200
+
+
+@main.route('/rules', methods=['POST'])
+def create_rule():
+    data = request.get_json()
+    required = ['org_id', 'name', 'severity', 'rule_logic']
+    missing = [f for f in required if f not in data]
+    if missing:
+        return jsonify({'error': f'Missing fields: {missing}'}), 400
+
+    valid_types = {'threshold', 'sequence', 'distinct_value', 'existence', 'time_rate'}
+    rule_type = data['rule_logic'].get('type')
+    if rule_type not in valid_types:
+        return jsonify({'error': f'rule_logic.type must be one of: {valid_types}'}), 400
+
+    result = supabase_client.table('correlation_rules').insert({
+        'org_id': data['org_id'],
+        'name': data['name'],
+        'mitre_technique': data.get('mitre_technique'),
+        'severity': data['severity'],
+        'rule_logic': data['rule_logic'],
+    }).execute()
+
+    return jsonify(result.data[0]), 201
+
+
+@main.route('/rules/<rule_id>', methods=['PUT'])
+def update_rule(rule_id):
+    data = request.get_json()
+    allowed = {'name', 'mitre_technique', 'severity', 'rule_logic'}
+    update_data = {k: v for k, v in data.items() if k in allowed}
+
+    if not update_data:
+        return jsonify({'error': 'No valid fields to update'}), 400
+
+    result = supabase_client.table('correlation_rules').update(update_data).eq('id', rule_id).execute()
+
+    if not result.data:
+        return jsonify({'error': 'Rule not found'}), 404
+
+    return jsonify(result.data[0]), 200
+
+
+@main.route('/rules/<rule_id>', methods=['DELETE'])
+def delete_rule(rule_id):
+    result = supabase_client.table('correlation_rules').delete().eq('id', rule_id).execute()
+
+    if not result.data:
+        return jsonify({'error': 'Rule not found'}), 404
+
+    return jsonify({'deleted': rule_id}), 200
+
+
+# ------------------------------------------------------------------
+# Detections
+# ------------------------------------------------------------------
+
+@main.route('/detections', methods=['GET'])
+def list_detections():
+    org_id = request.args.get('org_id')
+    if not org_id:
+        return jsonify({'error': 'org_id is required'}), 400
+
+    query = supabase_client.table('detections').select('*').eq('org_id', org_id)
+
+    file_id = request.args.get('file_id')
+    if file_id:
+        query = query.eq('file_id', file_id)
+
+    result = query.execute()
+    return jsonify(result.data), 200

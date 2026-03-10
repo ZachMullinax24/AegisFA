@@ -1,0 +1,17 @@
+[
+  {"timestamp": "2026-03-10T01:12:03Z", "username": "admin", "source_ip": "203.0.113.45", "action": "login", "result": "failure", "reason": "invalid_password"},
+  {"timestamp": "2026-03-10T01:12:05Z", "username": "admin", "source_ip": "203.0.113.45", "action": "login", "result": "failure", "reason": "invalid_password"},
+  {"timestamp": "2026-03-10T01:12:08Z", "username": "admin", "source_ip": "203.0.113.45", "action": "login", "result": "failure", "reason": "invalid_password"},
+  {"timestamp": "2026-03-10T01:12:10Z", "username": "admin", "source_ip": "203.0.113.45", "action": "login", "result": "failure", "reason": "invalid_password"},
+  {"timestamp": "2026-03-10T01:12:12Z", "username": "admin", "source_ip": "203.0.113.45", "action": "login", "result": "failure", "reason": "invalid_password"},
+  {"timestamp": "2026-03-10T01:12:15Z", "username": "admin", "source_ip": "203.0.113.45", "action": "login", "result": "success", "reason": null},
+  {"timestamp": "2026-03-10T01:12:45Z", "username": "admin", "source_ip": "203.0.113.45", "action": "privilege_escalation", "result": "success", "reason": "added_to_domain_admins"},
+  {"timestamp": "2026-03-10T01:13:02Z", "username": "admin", "source_ip": "203.0.113.45", "action": "file_access", "result": "success", "reason": "accessed_/etc/shadow"},
+  {"timestamp": "2026-03-10T01:13:30Z", "username": "admin", "source_ip": "203.0.113.45", "action": "data_export", "result": "success", "reason": "scp_to_198.51.100.22"},
+  {"timestamp": "2026-03-10T01:14:00Z", "username": "admin", "source_ip": "10.0.0.5", "action": "login", "result": "success", "reason": null},
+  {"timestamp": "2026-03-10T01:14:15Z", "username": "admin", "source_ip": "10.0.0.5", "action": "login", "result": "success", "reason": "lateral_movement_to_db_server"},
+  {"timestamp": "2026-03-10T01:14:45Z", "username": "admin", "source_ip": "10.0.0.5", "action": "file_access", "result": "success", "reason": "accessed_customer_db_dump"},
+  {"timestamp": "2026-03-10T01:15:00Z", "username": "svc_backup", "source_ip": "10.0.0.12", "action": "login", "result": "success", "reason": null},
+  {"timestamp": "2026-03-10T01:15:10Z", "username": "jsmith", "source_ip": "192.168.1.100", "action": "login", "result": "success", "reason": null},
+  {"timestamp": "2026-03-10T01:15:30Z", "username": "jsmith", "source_ip": "192.168.1.100", "action": "file_access", "result": "success", "reason": "normal_document_access"}
+]
