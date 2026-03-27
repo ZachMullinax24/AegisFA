@@ -486,7 +486,7 @@ def org_timeline():
     )
     return jsonify(result), 200
 
-    @main.route('/validate-code', methods=['POST'])
+@main.route('/validate-code', methods=['POST'])
 def validate_code():
     data = request.get_json()
     code = data.get('code', '').upper()
