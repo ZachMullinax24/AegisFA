@@ -15,12 +15,19 @@ def load_model():
 
         model_name = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
         _tokenizer = AutoTokenizer.from_pretrained(model_name)
-        _model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,
-            device_map="auto",
-            low_cpu_mem_usage=True,
-        )
+        try:
+            _model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.float16,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "Local LLM loading failed. Install 'accelerate' and ensure"
+                " enough memory for model loading. Original error: "
+                f"{e}"
+            )
         print("The model is loaded.")
     return _model, _tokenizer
 
@@ -43,6 +50,8 @@ def normalize_log_with_ai(source, raw_data):
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
     inputs = tokenizer(text, return_tensors="pt")
+    model_device = next(model.parameters()).device
+    inputs = {k: v.to(model_device) for k, v in inputs.items()}
     with torch.no_grad():
         outputs = model.generate(
             **inputs,

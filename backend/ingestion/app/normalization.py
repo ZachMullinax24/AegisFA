@@ -1,3 +1,6 @@
+## NOTES:
+## This function is not part of the main path- it is called by the log processing pipeline in routes.py and is not imported by any other module.
+## This is indirectly used as fallback in AI normalization service if the AI fails to produce a valid output.
 def normalize_log(source, raw_data): 
 
     normalized = {

@@ -3,6 +3,34 @@ import json
 from . import supabase_client
 from .openai_client import get_openai_client, get_embedding
 
+
+def _compact_log_entries(
+    log_entries: list[dict],
+    max_entries: int = 60,
+    max_fields: int = 16,
+    max_value_len: int = 120,
+) -> list[dict]:
+    """Build a compact, token-efficient representation of logs for LLM prompts."""
+    compacted: list[dict] = []
+
+    for entry in log_entries[:max_entries]:
+        if not isinstance(entry, dict):
+            compacted.append({"value": str(entry)[:max_value_len]})
+            continue
+
+        slim: dict = {}
+        for idx, (key, value) in enumerate(entry.items()):
+            if idx >= max_fields:
+                break
+            if isinstance(value, (dict, list)):
+                slim[key] = str(value)[:max_value_len]
+            else:
+                slim[key] = str(value)[:max_value_len]
+
+        compacted.append(slim)
+
+    return compacted
+
 def analyze_threats(
     log_entries: list[dict],
     source_type: str,
@@ -33,7 +61,8 @@ def analyze_threats(
     }
 
 def _detect_threats(client, log_entries: list[dict], source_type: str) -> list[dict]:
-    entries_json = json.dumps(log_entries[:200], default=str)
+    compact_entries = _compact_log_entries(log_entries, max_entries=40, max_fields=14, max_value_len=100)
+    entries_json = json.dumps(compact_entries, default=str)
 
     system_prompt = (
         "You are a security threat analyst. Analyze the following log entries "
@@ -49,7 +78,7 @@ def _detect_threats(client, log_entries: list[dict], source_type: str) -> list[d
 
     user_prompt = (
         f"Source type: {source_type}\n"
-        f"Log entries ({len(log_entries)} total):\n{entries_json}"
+        f"Log entries ({len(log_entries)} total, sampled/compacted for analysis):\n{entries_json}"
     )
 
     response = client.chat.completions.create(
@@ -129,7 +158,10 @@ def _generate_incident_summary(
         detection_text = "Correlation rule detections:\n" + "\n".join(det_parts)
 
     findings_text = json.dumps(findings[:15], indent=2, default=str)
-    sample_entries = json.dumps(log_entries[:20], default=str)
+    sample_entries = json.dumps(
+        _compact_log_entries(log_entries, max_entries=20, max_fields=12, max_value_len=80),
+        default=str,
+    )
 
     system_prompt = (
         "You are a senior forensic analyst writing an incident report. "

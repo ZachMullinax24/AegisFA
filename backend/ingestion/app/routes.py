@@ -6,9 +6,140 @@ from .rag_service import analyze_threats
 from .correlation_engine import run_correlation
 from .timeline_service import get_file_timeline, get_org_timeline
 from .storage import upload_file, download_file
+from .log_classifier import get_classifier
+from .insights_generator import get_insights_generator
 from datetime import datetime, timezone
 
 main = Blueprint('main', __name__)
+
+RAW_LOG_INSERT_BATCH_SIZE = 200
+_VALID_SEVERITIES = {"low", "medium", "high", "critical"}
+
+
+def _normalize_severity(value: str) -> str:
+    if not value:
+        return "medium"
+    normalized = str(value).strip().lower()
+    return normalized if normalized in _VALID_SEVERITIES else "medium"
+
+
+def _detections_to_threats(detections):
+    threats = []
+    for detection in detections or []:
+        rule_name = detection.get('rule_name') or 'correlation_rule'
+        description = detection.get('description') or f"Correlation rule '{rule_name}' triggered"
+        threats.append({
+            'threat_type': rule_name,
+            'severity': _normalize_severity(detection.get('severity')),
+            'description': description,
+            'timestamp': detection.get('detected_at') or detection.get('created_at'),
+            'affected_entries': detection.get('matched_event_indices', []),
+            'indicators': [
+                f"MITRE: {detection.get('mitre_technique')}" if detection.get('mitre_technique') else "",
+                f"confidence={detection.get('confidence')}" if detection.get('confidence') is not None else "",
+            ],
+        })
+
+    for threat in threats:
+        threat['indicators'] = [i for i in threat.get('indicators', []) if i]
+    return threats
+
+
+def _insert_raw_logs_in_batches(entries, org_id, file_id):
+    rows = [
+        {
+            'org_id': org_id,
+            'payload': entry,
+            'file_id': file_id,
+        }
+        for entry in entries
+    ]
+
+    for i in range(0, len(rows), RAW_LOG_INSERT_BATCH_SIZE):
+        batch = rows[i:i + RAW_LOG_INSERT_BATCH_SIZE]
+        supabase_client.table('raw_logs').insert(batch).execute()
+
+
+def _build_actionable_insights_payload(
+    threats=None,
+    detections=None,
+    logs=None,
+    source_type='custom',
+):
+    """Build unified actionable-insights payload from threats/detections/logs."""
+    threats = threats or []
+    detections = detections or []
+    logs = logs or []
+
+    if not threats and detections:
+        threats = _detections_to_threats(detections)
+
+    if not threats:
+        return {
+            'status': 'no_threats',
+            'source_type': source_type,
+            'threat_count': 0,
+            'detection_count': len(detections),
+            'classification_context': {
+                'total': 0,
+                'by_category': {},
+                'average_confidence': 0.0,
+            },
+            'insights': [],
+            'incident_summary': {
+                'status': 'no_threats',
+                'summary': 'No threats detected',
+                'logs_analyzed': len(logs),
+                'risk_level': 'low',
+            },
+            'investigation_guide': {},
+        }
+
+    classifier = get_classifier()
+    classification_context = {
+        'total': 0,
+        'by_category': {},
+        'average_confidence': 0.0,
+    }
+
+    if logs:
+        rf_results = classifier.classify_batch(logs)
+        by_category = {}
+        confidences = []
+        for result in rf_results:
+            category = result.get('category', 'unknown')
+            by_category[category] = by_category.get(category, 0) + 1
+            confidences.append(result.get('confidence', 0.0))
+
+        classification_context = {
+            'total': len(rf_results),
+            'by_category': by_category,
+            'average_confidence': (sum(confidences) / len(confidences)) if confidences else 0.0,
+            'details': rf_results[:50],
+        }
+
+    insights_generator = get_insights_generator()
+    insights = insights_generator.generate_threat_insights(threats)
+    incident_summary = insights_generator.generate_incident_summary(
+        threats,
+        log_count=len(logs),
+        correlation_data={'detection_count': len(detections)},
+    )
+    investigation_guide = insights_generator.generate_investigation_guide(
+        classification_context,
+        threats,
+    )
+
+    return {
+        'status': 'completed',
+        'source_type': source_type,
+        'threat_count': len(threats),
+        'detection_count': len(detections),
+        'classification_context': classification_context,
+        'insights': insights,
+        'incident_summary': incident_summary,
+        'investigation_guide': investigation_guide,
+    }
 
 @main.route('/ingest', methods=['POST'])
 def ingest():
@@ -84,12 +215,7 @@ def upload_log_file():
         return jsonify({'error': f'Failed to save file record: {str(e)}'}), 500
 
     try:
-        for entry in entries:
-            supabase_client.table('raw_logs').insert({
-                'org_id': org_id,
-                'payload': entry,
-                'file_id': file_id
-            }).execute()
+        _insert_raw_logs_in_batches(entries, org_id, file_id)
     except Exception as e:
         supabase_client.table('log_files').update({'status': 'failed'}).eq('id', file_id).execute()
         return jsonify({'error': f'Failed to store log entries: {str(e)}'}), 500
@@ -127,6 +253,19 @@ def upload_log_file():
 
     supabase_client.table('log_files').update({'status': 'completed'}).eq('id', file_id).execute()
 
+    try:
+        actionable_insights = _build_actionable_insights_payload(
+            threats=analysis.get('detailed_findings', []),
+            detections=detections,
+            logs=entries,
+            source_type=source_type,
+        )
+    except Exception as e:
+        actionable_insights = {
+            'status': 'error',
+            'message': f'Failed to generate actionable insights: {str(e)}',
+        }
+
     return jsonify({
         'file_id': file_id,
         'filename': file.filename,
@@ -140,7 +279,8 @@ def upload_log_file():
             'mitre_techniques': analysis.get('mitre_techniques'),
             'attack_vector': analysis.get('attack_vector'),
             'confidence_score': analysis.get('confidence_score'),
-        }
+        },
+        'actionable_insights': actionable_insights,
     }), 201
 
 
@@ -202,6 +342,19 @@ def analyze_stored_file(file_id):
 
     supabase_client.table('log_files').update({'status': 'completed'}).eq('id', file_id).execute()
 
+    try:
+        actionable_insights = _build_actionable_insights_payload(
+            threats=analysis.get('detailed_findings', []),
+            detections=detections,
+            logs=entries,
+            source_type=source_type,
+        )
+    except Exception as e:
+        actionable_insights = {
+            'status': 'error',
+            'message': f'Failed to generate actionable insights: {str(e)}',
+        }
+
     return jsonify({
         'file_id': file_id,
         'entry_count': len(entries),
@@ -214,7 +367,8 @@ def analyze_stored_file(file_id):
             'mitre_techniques': analysis.get('mitre_techniques'),
             'attack_vector': analysis.get('attack_vector'),
             'confidence_score': analysis.get('confidence_score'),
-        }
+        },
+        'actionable_insights': actionable_insights,
     }), 201
 
 
@@ -261,12 +415,7 @@ def analyze_from_storage():
         return jsonify({'error': f'Failed to create file record: {str(e)}'}), 500
 
     try:
-        for entry in entries:
-            supabase_client.table('raw_logs').insert({
-                'org_id': org_id,
-                'payload': entry,
-                'file_id': file_id
-            }).execute()
+        _insert_raw_logs_in_batches(entries, org_id, file_id)
     except Exception as e:
         supabase_client.table('log_files').update({'status': 'failed'}).eq('id', file_id).execute()
         return jsonify({'error': f'Failed to store log entries: {str(e)}'}), 500
@@ -304,6 +453,19 @@ def analyze_from_storage():
 
     supabase_client.table('log_files').update({'status': 'completed'}).eq('id', file_id).execute()
 
+    try:
+        actionable_insights = _build_actionable_insights_payload(
+            threats=analysis.get('detailed_findings', []),
+            detections=detections,
+            logs=entries,
+            source_type=source_type,
+        )
+    except Exception as e:
+        actionable_insights = {
+            'status': 'error',
+            'message': f'Failed to generate actionable insights: {str(e)}',
+        }
+
     return jsonify({
         'file_id': file_id,
         'filename': filename,
@@ -318,7 +480,8 @@ def analyze_from_storage():
             'mitre_techniques': analysis.get('mitre_techniques'),
             'attack_vector': analysis.get('attack_vector'),
             'confidence_score': analysis.get('confidence_score'),
-        }
+        },
+        'actionable_insights': actionable_insights,
     }), 201
 
 
@@ -411,6 +574,107 @@ def list_detections():
 
     result = query.execute()
     return jsonify(result.data), 200
+
+
+@main.route('/classifier/train', methods=['POST'])
+def train_classifier():
+    """Train RF classifier with labeled structured logs."""
+    data = request.get_json() or {}
+    training_rows = data.get('training_data', [])
+    persist_model = bool(data.get('persist_model', True))
+
+    if not training_rows:
+        return jsonify({'error': 'training_data is required'}), 400
+
+    prepared = []
+    for row in training_rows:
+        log_entry = row.get('log') if isinstance(row, dict) else None
+        category = row.get('category') if isinstance(row, dict) else None
+        if isinstance(log_entry, dict) and isinstance(category, str):
+            prepared.append((log_entry, category))
+
+    if not prepared:
+        return jsonify({'error': 'No valid training rows; expected [{"log": {...}, "category": "..."}]'}), 400
+
+    classifier = get_classifier()
+    result = classifier.train(prepared)
+
+    if result.get('status') == 'trained' and persist_model:
+        save_result = classifier.save_model()
+        result['model'] = save_result
+
+    return jsonify(result), 200
+
+
+@main.route('/classifier/load', methods=['POST'])
+def load_classifier_model():
+    """Load persisted RF classifier from disk."""
+    data = request.get_json() or {}
+    filepath = data.get('filepath')
+
+    classifier = get_classifier()
+    result = classifier.load_model(filepath=filepath)
+    status_code = 200 if result.get('status') == 'loaded' else 404
+    return jsonify(result), status_code
+
+
+@main.route('/classifier/classify', methods=['POST'])
+def classify_logs():
+    """Classify one or many structured logs using RF classifier."""
+    data = request.get_json() or {}
+    logs = data.get('logs')
+    log = data.get('log')
+
+    classifier = get_classifier()
+
+    if isinstance(logs, list):
+        return jsonify({'results': classifier.classify_batch(logs)}), 200
+    if isinstance(log, dict):
+        return jsonify({'result': classifier.classify(log)}), 200
+
+    return jsonify({'error': 'Provide either log (object) or logs (array)'}), 400
+
+
+@main.route('/insights/actionable', methods=['POST'])
+def generate_actionable_insights():
+    """Generate actionable LLM insights from detections or provided threat findings."""
+    data = request.get_json() or {}
+
+    threats = data.get('threats')
+    detections = data.get('detections')
+    logs = data.get('logs', [])
+    source_type = data.get('source_type', 'custom')
+
+    if threats is None and detections is None:
+        file_id = data.get('file_id')
+        if not file_id:
+            return jsonify({'error': 'Provide one of: threats, detections, or file_id'}), 400
+
+        analysis_result = (
+            supabase_client
+            .table('analysis_results')
+            .select('detailed_findings, correlation_detections')
+            .eq('file_id', file_id)
+            .limit(1)
+            .execute()
+        )
+        if not analysis_result.data:
+            return jsonify({'error': 'No analysis results found for file_id'}), 404
+
+        row = analysis_result.data[0]
+        threats = row.get('detailed_findings') or []
+        detections = row.get('correlation_detections') or []
+
+    if threats is None:
+        threats = _detections_to_threats(detections)
+
+    payload = _build_actionable_insights_payload(
+        threats=threats,
+        detections=detections,
+        logs=logs,
+        source_type=source_type,
+    )
+    return jsonify(payload), 200
 
 
 # ---------------------------------------------------------------------------
