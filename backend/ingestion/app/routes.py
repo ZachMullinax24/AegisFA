@@ -485,3 +485,25 @@ def org_timeline():
         page_size=page_size,
     )
     return jsonify(result), 200
+
+    @main.route('/validate-code', methods=['POST'])
+def validate_code():
+    data = request.get_json()
+    code = data.get('code', '').upper()
+    email = data.get('email', '')
+
+    if not code:
+        return jsonify({'error': 'Code is required'}), 400
+
+    result = supabase_client.table('access_codes').select('*').eq('code', code).eq('used', False).execute()
+
+    if not result.data:
+        return jsonify({'error': 'Invalid or already used access code'}), 401
+
+    # Mark code as used immediately so nobody else can use it
+    supabase_client.table('access_codes').update({
+        'used': True,
+        'used_by': email
+    }).eq('code', code).execute()
+
+    return jsonify({'valid': True, 'org_id': result.data[0]['org_id']}), 200
