@@ -1,0 +1,59 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Syne:wght@400;500;600;700&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Syne', sans-serif;
+  background: #0a0c0f;
+  color: #c9d1d9;
+  min-height: 100vh;
+}
+
+.mono { font-family: 'JetBrains Mono', monospace; }
+
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #21262d; border-radius: 3px; }
+
+/* ── BADGES ─────────────────────────────────────────────────── */
+.badge { font-size: 10px; font-family: 'JetBrains Mono', monospace; padding: 3px 9px; border-radius: 4px; border: 1px solid; display: inline-block; }
+.badge-red    { background: #ff555522; color: #ff5555; border-color: #ff555533; }
+.badge-amber  { background: #f1a23022; color: #f1a230; border-color: #f1a23033; }
+.badge-green  { background: #00ff9d22; color: #00ff9d; border-color: #00ff9d33; }
+.badge-blue   { background: #58a6ff22; color: #58a6ff; border-color: #58a6ff33; }
+.badge-gray   { background: #21262d;   color: #6e7681; border-color: #30363d; }
+
+/* ── PANEL ───────────────────────────────────────────────────── */
+.panel { background: #111318; border: 1px solid #21262d; border-radius: 10px; overflow: hidden; }
+.panel-header { padding: 12px 16px; border-bottom: 1px solid #21262d; display: flex; align-items: center; justify-content: space-between; }
+.panel-title { font-size: 11px; font-weight: 500; color: #c9d1d9; font-family: 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: 1.5px; }
+
+/* ── BUTTON ──────────────────────────────────────────────────── */
+.btn { padding: 8px 16px; border-radius: 7px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid #21262d; background: #161b22; color: #c9d1d9; font-family: 'Syne', sans-serif; transition: all 0.15s; }
+.btn:hover { border-color: #00ff9d55; color: #00ff9d; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary { background: #00ff9d22; border-color: #00ff9d55; color: #00ff9d; }
+.btn-primary:hover { background: #00ff9d33; }
+.btn-danger { background: #ff555511; border-color: #ff555533; color: #ff5555; }
+
+/* ── INPUT ───────────────────────────────────────────────────── */
+.input { width: 100%; background: #0d1117; border: 1px solid #21262d; border-radius: 7px; padding: 11px 15px; color: #e6edf3; font-family: 'JetBrains Mono', monospace; font-size: 13px; outline: none; transition: border-color 0.15s; }
+.input:focus { border-color: #00ff9d; }
+
+.select { background: #0d1117; border: 1px solid #21262d; border-radius: 6px; padding: 7px 11px; color: #c9d1d9; font-family: 'JetBrains Mono', monospace; font-size: 12px; outline: none; cursor: pointer; }
+.select:focus { border-color: #00ff9d55; }
+
+/* ── EMPTY STATE ─────────────────────────────────────────────── */
+.empty-state { padding: 2rem; text-align: center; font-size: 12px; font-family: 'JetBrains Mono', monospace; color: #3a3f47; }
+
+/* ── SPINNER ─────────────────────────────────────────────────── */
+.spinner { width: 20px; height: 20px; border: 2px solid #21262d; border-top-color: #00ff9d; border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── SEVERITY DOTS ───────────────────────────────────────────── */
+.sev-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
+.sev-critical { background: #ff5555; box-shadow: 0 0 6px #ff555566; }
+.sev-high     { background: #f1a230; }
+.sev-medium   { background: #58a6ff; }
+.sev-low      { background: #00ff9d; }
+.sev-none     { background: #6e7681; }
