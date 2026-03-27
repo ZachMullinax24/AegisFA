@@ -1,6 +1,7 @@
 from flask import Flask
 from supabase import create_client, Client
 import os
+from .logging_config import setup_logging
 
 supabase_client: Client = None
 

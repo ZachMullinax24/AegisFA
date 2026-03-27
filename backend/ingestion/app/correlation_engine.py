@@ -1,5 +1,5 @@
 import re
-import logging
+import structlog
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional
@@ -7,6 +7,8 @@ from typing import Optional
 
 from . import supabase_client
 from .timestamp_utils import parse_timestamp as _parse_timestamp
+
+logger = structlog.get_logger(__name__)
 
 _OPS = {
     "eq": lambda val, rule_val: val == rule_val,
@@ -17,27 +19,87 @@ _OPS = {
     "exists": lambda val, _: val is not None,
 }
 
+def _record_correlation_error(
+    org_id: str,
+    file_id: str,
+    error_stage: str,
+    rule: Optional[dict] = None,
+    exc: Optional[Exception] = None,
+    details: Optional[dict] = None,
+    request_id: Optional[str] = None,
+) -> None:
+    safe_details = details.copy() if details else {}
+    if request_id:
+        safe_details["request_id"] = request_id
+
+    payload = {
+        "org_id": org_id,
+        "file_id": file_id,
+        "rule_id": rule.get("id") if rule else None,
+        "error_stage": error_stage,
+        "error_type": type(exc).__name__ if exc else "CorrelationError",
+        "message": str(exc)[:1000] if exc else "Correlation error",
+        "details": safe_details,
+    }
+    try:
+        supabase_client.table("correlation_errors").insert(payload).execute()
+    except Exception as insert_exc:
+        logger.exception(
+            "Failed to persist correlation error",
+            org_id=org_id,
+            file_id=file_id,
+            error_stage=error_stage,
+            insert_error=str(insert_exc),
+            request_id=request_id,
+        )
+
 def run_correlation(
     entries: list[dict],
     org_id: str,
-    file_id: str,) -> list[dict]:
-
-    logger = logging.getLogger(__name__)
+    file_id: str,
+    request_id: Optional[str] = None,
+) -> list[dict]:
+    context = {"org_id": org_id, "file_id": file_id}
+    if request_id:
+        context["request_id"] = request_id
+    log = logger.bind(**context)
 
     if len(entries) > 100000:
-        logger.warning(f"The file: {file_id} is a large datase. Performance may be slow due to excessive log count:({len(entries)})")
+        log.warning(
+            "Large dataset; performance may be slow",
+            entry_count=len(entries),
+        )
 
-    rules = _fetch_rules(org_id)
+    try:
+        rules = _fetch_rules(org_id, file_id)
+    except Exception as exc:
+        _record_correlation_error(
+            org_id=org_id,
+            file_id=file_id,
+            error_stage="fetch_rules",
+            exc=exc,
+            request_id=request_id,
+        )
+        log.exception("Failed to fetch correlation rules")
+        return []
+
     detections = []
 
     for rule in rules:
         if len(entries) > 50000:
             batch_size = 50000
             for i in range(0, len(entries), batch_size):
-                batch = entries[i:i+batch_size]
-                result = _evaluate_rule(rule, batch)
+                batch = entries[i:i + batch_size]
+                result = _evaluate_rule(
+                    rule=rule,
+                    entries=batch,
+                    org_id=org_id,
+                    file_id=file_id,
+                    batch_index=i,
+                    batch_size=batch_size,
+                    request_id=request_id,
+                )
                 if result is not None:
-                    # Adjust indices to account for batching
                     result["matched_indices"] = [idx + i for idx in result["matched_indices"]]
                     detection_id = _save_detection(
                         org_id=org_id,
@@ -46,23 +108,24 @@ def run_correlation(
                         matched_indices=result["matched_indices"],
                         confidence=result["confidence"],
                         description=result["description"],
+                        request_id=request_id,
                     )
-                    detections.append({
-                        "detection_id": detection_id,
-                        "rule_name": rule["name"],
-                        "mitre_technique": rule.get("mitre_technique", ""),
-                        "severity": rule.get("severity", "medium"),
-                        "confidence": result["confidence"],
-                        "matched_event_indices": result["matched_indices"],
-                        "description": result["description"],
-                    })
-        
+                    if detection_id:
+                        detections.append({
+                            "detection_id": detection_id,
+                            "rule_name": rule["name"],
+                            "mitre_technique": rule.get("mitre_technique", ""),
+                            "severity": rule.get("severity", "medium"),
+                            "confidence": result["confidence"],
+                            "matched_event_indices": result["matched_indices"],
+                            "description": result["description"],
+                        })
+
     return detections
 
 _rule_cache = {}
 
-def _fetch_rules(org_id: str) -> list[dict]:
-
+def _fetch_rules(org_id: str, file_id: str) -> list[dict]:
     if org_id in _rule_cache:
         return _rule_cache[org_id]
     
@@ -80,6 +143,7 @@ def _fetch_rules(org_id: str) -> list[dict]:
     )
     rules = (default_rules.data or []) + (org_rules.data or [])
     _rule_cache[org_id] = rules
+    logger.info("Fetched correlation rules", org_id=org_id, rule_count=len(rules))
     return rules
 
 _EVALUATORS = {}
@@ -103,24 +167,124 @@ def _validate_rule_logic(rule: dict) -> bool:
         return "rate_per_minute" in logic
     return False
 
-def _evaluate_rule(rule: dict, entries: list[dict]) -> Optional[dict]:
-    
-    logger = logging.getLogger(__name__)
+def _evaluate_rule(
+    rule: dict,
+    entries: list[dict],
+    org_id: str,
+    file_id: str,
+    batch_index: int = 0,
+    batch_size: int = 0,
+    request_id: Optional[str] = None,
+) -> Optional[dict]:
+    context = {
+        "org_id": org_id,
+        "file_id": file_id,
+        "rule_id": rule.get("id"),
+    }
+    if request_id:
+        context["request_id"] = request_id
+    log = logger.bind(**context)
 
-    try: 
+    log.info(
+        "Evaluating rule",
+        rule_name=rule.get("name"),
+        rule_type=(rule.get("rule_logic") or {}).get("type"),
+    )
+    try:
         logic = rule.get("rule_logic", {})
         rule_type = logic.get("type")
 
         if not _validate_rule_logic(rule):
-            logger.warning(f"Invalid logic for rule {rule['id']}: {logic}")
+            log.info("About to record correlation error")
+            _record_correlation_error(
+                org_id=org_id,
+                file_id=file_id,
+                rule=rule,
+                error_stage="validate_rule",
+                details={
+                    "rule_type": rule_type,
+                    "rule_logic": logic,
+                    "batch_index": batch_index,
+                    "batch_size": batch_size,
+                },
+                request_id=request_id,
+            )
+            log.warning("Invalid rule logic")
             return None
+
         evaluator = _EVALUATORS.get(rule_type)
         if evaluator is None:
-            logger.warning(f"No evaluator found for rule type '{rule_type}' in rule {rule['id']}")
+            log.info("About to record correlation error")
+            _record_correlation_error(
+                org_id=org_id,
+                file_id=file_id,
+                rule=rule,
+                error_stage="evaluator_missing",
+                details={"rule_type": rule_type},
+                request_id=request_id,
+            )
+            log.warning("Missing evaluator", rule_type=rule_type)
             return None
+
         return evaluator(logic, entries)
-    except Exception as e:
-        logger.error(f"Error evaluating rule {rule['id']}: {e}")
+    except Exception as exc:
+        log.info("About to record correlation error")
+        _record_correlation_error(
+            org_id=org_id,
+            file_id=file_id,
+            rule=rule,
+            error_stage="evaluate_rule",
+            exc=exc,
+            details={
+                "batch_index": batch_index,
+                "batch_size": batch_size,
+            },
+            request_id=request_id,
+        )
+        log.exception("Error evaluating rule")
+        return None
+
+def _save_detection(
+    org_id: str,
+    file_id: str,
+    rule: dict,
+    matched_indices: list[int],
+    confidence: float,
+    description: str,
+    request_id: Optional[str] = None,
+) -> Optional[str]:
+    """Insert a detection record and return its UUID."""
+    context = {
+        "org_id": org_id,
+        "file_id": file_id,
+        "rule_id": rule.get("id"),
+    }
+    if request_id:
+        context["request_id"] = request_id
+    log = logger.bind(**context)
+
+    try:
+        result = supabase_client.table("detections").insert({
+            "org_id": org_id,
+            "rule_id": rule["id"],
+            "file_id": file_id,
+            "matched_indices": matched_indices,
+            "confidence": round(confidence, 4),
+            "severity": rule.get("severity", "medium"),
+            "description": description,
+        }).execute()
+        return result.data[0]["id"]
+    except Exception as exc:
+        _record_correlation_error(
+            org_id=org_id,
+            file_id=file_id,
+            rule=rule,
+            error_stage="save_detection",
+            exc=exc,
+            details={"matched_indices_count": len(matched_indices)},
+            request_id=request_id,
+        )
+        log.exception("Failed to save detection")
         return None
 
 def _entry_matches_filter(entry: dict, filters: list[dict]) -> bool:
@@ -428,23 +592,3 @@ _EVALUATORS = {
     "time_rate": _evaluate_time_rate,
     "composite": _evaluate_composite,
 }
-
-def _save_detection(
-    org_id: str,
-    file_id: str,
-    rule: dict,
-    matched_indices: list[int],
-    confidence: float,
-    description: str,
-) -> str:
-    """Insert a detection record and return its UUID."""
-    result = supabase_client.table("detections").insert({
-        "org_id": org_id,
-        "rule_id": rule["id"],
-        "file_id": file_id,
-        "matched_indices": matched_indices,
-        "confidence": round(confidence, 4),
-        "severity": rule.get("severity", "medium"),
-        "description": description,
-    }).execute()
-    return result.data[0]["id"]
