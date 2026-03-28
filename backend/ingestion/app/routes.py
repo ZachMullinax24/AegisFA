@@ -532,3 +532,28 @@ def get_user_org(user_id):
     if not result.data:
         return jsonify({'error': 'No organization found for this user'}), 404
     return jsonify({'org_id': result.data[0]['org_id']}), 200
+
+@main.route('/admin/delete-user', methods=['DELETE'])
+def delete_user():
+    data = request.get_json()
+    user_id = data.get('user_id')
+
+    if not user_id:
+        return jsonify({'error': 'user_id is required'}), 400
+
+    try:
+        # Remove from user_organizations first
+        supabase_client.table('user_organizations').delete().eq('user_id', user_id).execute()
+
+        # Delete from Supabase Auth using service role
+        from supabase import create_client
+        import os
+        admin_client = create_client(
+            os.environ['SUPABASE_URL'],
+            os.environ['SUPABASE_SERVICE_ROLE_KEY']
+        )
+        admin_client.auth.admin.delete_user(user_id)
+
+        return jsonify({'message': 'User deleted successfully'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
