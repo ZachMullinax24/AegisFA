@@ -507,3 +507,50 @@ def validate_code():
     }).eq('code', code).execute()
 
     return jsonify({'valid': True, 'org_id': result.data[0]['org_id']}), 200
+
+@main.route('/validate-code', methods=['POST'])
+def validate_code():
+    data = request.get_json()
+    code = data.get('code', '').upper()
+    email = data.get('email', '')
+    user_id = data.get('user_id', '')  # Supabase auth user id
+
+    if not code:
+        return jsonify({'error': 'Code is required'}), 400
+
+    # Check code exists and is not used
+    result = supabase_client.table('access_codes').select('*').eq('code', code).eq('used', False).execute()
+
+    if not result.data:
+        return jsonify({'error': 'Invalid or already used access code'}), 401
+
+    code_record = result.data[0]
+    org_id = code_record['org_id']
+
+    # Mark code as used
+    supabase_client.table('access_codes').update({
+        'used': True,
+        'used_by': email,
+        'user_id': user_id,
+    }).eq('code', code).execute()
+
+    # Link user to organization if user_id provided
+    if user_id:
+        try:
+            supabase_client.table('user_organizations').insert({
+                'user_id': user_id,
+                'org_id': org_id,
+            }).execute()
+        except Exception as e:
+            print(f"Warning: could not link user to org: {e}")
+
+    return jsonify({'valid': True, 'org_id': org_id}), 200
+
+
+@main.route('/user-org/<user_id>', methods=['GET'])
+def get_user_org(user_id):
+    """Returns the org_id for a given user."""
+    result = supabase_client.table('user_organizations').select('org_id').eq('user_id', user_id).execute()
+    if not result.data:
+        return jsonify({'error': 'No organization found for this user'}), 404
+    return jsonify({'org_id': result.data[0]['org_id']}), 200
