@@ -35,9 +35,12 @@ export default function Admin() {
   const [actionMsg, setActionMsg] = useState('');
 
   useEffect(() => {
-    checkHealth().then(() => setBackendOnline(true)).catch(() => setBackendOnline(false));
-    if (orgId) fetchAll();
-  }, [orgId]);
+  checkHealth().then(() => setBackendOnline(true)).catch(() => setBackendOnline(false));
+}, []);
+
+useEffect(() => {
+  if (orgId) fetchAll();
+}, [orgId]);
 
   async function fetchAll() {
     setLoading(true);
